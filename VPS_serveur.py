@@ -1,110 +1,110 @@
-import socket
-import threading
-import json
+import socket, threading, json
 
-HOST = "0.0.0.0"
-PORT = 12345
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT_CLIENTS = 5000  # port pour clients
+SERVER_PORT_GUI = 5001      # port pour le GUI/admin
 
-ADMIN_TOKEN = "ADMIN_SECRET"
+clients = {}  # client_id -> socket
+gui_socket = None
 
-clients = {}   # client_id -> socket
-admins = []    # sockets admin
-
-ALLOWED_ACTIONS = {
-    "ping",
-    "get_info"
-}
-
-def send(sock, data):
-    sock.sendall((json.dumps(data) + "\n").encode())
-
-def handle_connection(conn, addr):
-    print(f"[VPS] Connexion de {addr}")
+def handle_client(sock, addr):
+    global clients, gui_socket
     buffer = ""
-
-    role = None
     client_id = None
-
     try:
         while True:
-            data = conn.recv(4096)
+            data = sock.recv(4096).decode()
             if not data:
                 break
-
-            buffer += data.decode()
+            buffer += data
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 msg = json.loads(line)
 
-                # ---------- AUTH ----------
-                if msg["type"] == "auth":
-                    if msg["role"] == "admin":
-                        if msg.get("token") == ADMIN_TOKEN:
-                            role = "admin"
-                            admins.append(conn)
-                            print("[VPS] Admin connecté")
-                        else:
-                            conn.close()
-                            return
+                # Auth client
+                if msg.get("type") == "auth" and msg.get("role") == "client":
+                    client_id = msg.get("client_id")
+                    clients[client_id] = sock
+                    print(f"[+] Client connecté : {client_id}")
 
-                    elif msg["role"] == "client":
-                        role = "client"
-                        client_id = msg["client_id"]
-                        clients[client_id] = conn
-                        print(f"[VPS] Client enregistré: {client_id}")
+                    if gui_socket:
+                        gui_socket.sendall((json.dumps({
+                            "type": "client_join",
+                            "client_id": client_id
+                        }) + "\n").encode())
 
-                        # informer les admins
-                        for a in admins:
-                            send(a, {
-                                "type": "client_join",
-                                "client_id": client_id
-                            })
+                # Command response
+                elif msg.get("type") == "command_result" and gui_socket:
+                    gui_socket.sendall((json.dumps({
+                        "type": "client_response",
+                        "client_id": client_id,
+                        "action": msg["action"],
+                        "result": msg["result"]
+                    }) + "\n").encode())
+    except:
+        pass
+    finally:
+        if client_id and client_id in clients:
+            del clients[client_id]
+            print(f"[-] Client déconnecté : {client_id}")
+            if gui_socket:
+                gui_socket.sendall((json.dumps({
+                    "type": "client_left",
+                    "client_id": client_id
+                }) + "\n").encode())
+        sock.close()
 
-                # ---------- ADMIN ----------
-                elif role == "admin" and msg["type"] == "command_request":
-                    target = msg["target"]
-                    action = msg["action"]
+def handle_gui(sock, addr):
+    global gui_socket
+    gui_socket = sock
+    print("[+] GUI connecté")
+    buffer = ""
+    try:
+        while True:
+            data = sock.recv(4096).decode()
+            if not data:
+                break
+            buffer += data
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                msg = json.loads(line)
 
-                    if action not in ALLOWED_ACTIONS:
-                        continue
-
+                # Command request from GUI
+                if msg.get("type") == "command_request":
+                    target = msg.get("target")
+                    action = msg.get("action")
                     if target in clients:
-                        send(clients[target], {
+                        clients[target].sendall((json.dumps({
                             "type": "command",
                             "action": action
-                        })
-
-                # ---------- CLIENT ----------
-                elif role == "client" and msg["type"] == "command_result":
-                    for a in admins:
-                        send(a, {
-                            "type": "client_response",
-                            "client_id": client_id,
-                            "action": msg["action"],
-                            "result": msg["result"]
-                        })
-
-    except Exception as e:
-        print("[VPS] Erreur:", e)
-
+                        }) + "\n").encode())
+    except:
+        pass
     finally:
-        if role == "client" and client_id in clients:
-            del clients[client_id]
-        if conn in admins:
-            admins.remove(conn)
+        gui_socket = None
+        sock.close()
+        print("[-] GUI déconnecté")
 
-        conn.close()
-        print("[VPS] Déconnexion", addr)
-
+# -------------------
+# Lancement du serveur
+# -------------------
 def main():
-    s = socket.socket()
-    s.bind((HOST, PORT))
-    s.listen()
-    print(f"[VPS] Écoute sur {HOST}:{PORT}")
+    # Thread clients
+    threading.Thread(target=lambda: accept_connections(SERVER_PORT_CLIENTS, handle_client), daemon=True).start()
+    # Thread GUI
+    threading.Thread(target=lambda: accept_connections(SERVER_PORT_GUI, handle_gui), daemon=True).start()
 
+    print(f"Serveur VPS démarré. Ports clients: {SERVER_PORT_CLIENTS}, GUI: {SERVER_PORT_GUI}")
     while True:
-        conn, addr = s.accept()
-        threading.Thread(target=handle_connection, args=(conn, addr), daemon=True).start()
+        pass
+
+def accept_connections(port, handler):
+    sock = socket.socket()
+    sock.bind((SERVER_HOST, port))
+    sock.listen(5)
+    while True:
+        client_sock, addr = sock.accept()
+        threading.Thread(target=handler, args=(client_sock, addr), daemon=True).start()
 
 if __name__ == "__main__":
     main()
