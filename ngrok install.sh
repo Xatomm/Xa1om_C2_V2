@@ -16,7 +16,7 @@ sudo mv ngrok /usr/local/bin/
 rm ngrok.zip
 
 # Configure ngrok with the provided token
-ngrok config add-authtoken $NGROK_TOKEN
+ngrok authtoken $NGROK_TOKEN
 
 # Verify installation
 ngrok version
